@@ -86,6 +86,8 @@ jobs:
           ro.config.show_ime=true
           qemu.hw.mainkeys=0
           ro.boot.selinux=permissive
+          persist.sys.debug.force_default_orientation=0
+          persist.sys.bluetooth.hardware=false
           EOT
 
           # 4. Debloat Agresif
