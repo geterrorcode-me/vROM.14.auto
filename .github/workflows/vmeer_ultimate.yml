@@ -36,39 +36,13 @@ jobs:
             mv "$SOURCE_IMG" system_raw.img
           fi
 
-      - name: Process, Debloat & Inject
+            - name: Process, Debloat & Inject
         run: |
-          # Gunakan SATU sudo bash. EOF harus di paling kiri (no spaces).
           sudo bash << 'EOF'
           set -e
           mkdir -p sys_mount sys_work
 
-          # 1. Konversi Sparse Image
-          if file -bL system_raw.img | grep -qi "sparse"; then
-              simg2img system_raw.img system_raw.img.raw
-              mv system_raw.img.raw system_raw.img
-          fi
-
-          # 2. Ekstraksi
-          SUCCESS=false
-          if file -bL system_raw.img | grep -qi "erofs"; then
-              erofsfuse -o ro system_raw.img sys_mount && {
-                cp -a sys_mount/. sys_work/
-                fusermount -u sys_mount 2>/dev/null || umount -l sys_mount
-                SUCCESS=true
-              } || {
-                fsck.erofs --extract=sys_work --no-preserve system_raw.img && SUCCESS=true
-              }
-          else
-              for opt in "loop,ro,noload" "loop,ro" "loop"; do
-                if mount -t ext4 -o $opt system_raw.img sys_mount 2>/dev/null; then
-                  cp -a sys_mount/. sys_work/
-                  umount -l sys_mount
-                  SUCCESS=true
-                  break
-                fi
-              done
-          fi
+          # ... (kode ekstraksi Anda sebelumnya) ...
 
           if [ "$SUCCESS" = false ]; then
               debugfs -R "rdump / sys_work" system_raw.img 2>/dev/null || exit 1
@@ -78,33 +52,23 @@ jobs:
           BPROP="sys_work/system/build.prop"
           [ ! -f "$BPROP" ] && BPROP="sys_work/build.prop"
 
-          # EOT juga harus di paling kiri
+          # Pastikan penulisan cat >> berada dalam indentasi shell, 
+          # tapi EOT penutup harus di pojok kiri baris baru.
           cat >> "$BPROP" <<EOT
-persist.sys.freeform_support=true
-persist.multi_window.enable=true
-ro.sf.lcd_density=160
-persist.sys.cursor.enable=true
-ro.input.mouse.enabled=1
-ro.config.show_ime=true
-qemu.hw.mainkeys=0
-ro.boot.selinux=permissive
+          persist.sys.freeform_support=true
+          persist.multi_window.enable=true
+          ro.sf.lcd_density=160
+          persist.sys.cursor.enable=true
+          ro.input.mouse.enabled=1
+          ro.config.show_ime=true
+          qemu.hw.mainkeys=0
+          ro.boot.selinux=permissive
 EOT
 
-          rm -rf sys_work/system/product/app/{YouTube*,Maps*,Gmail*,Drive*,Photos*,Chrome*} || true
-          
-          # Injeksi Browser (Pastikan link aktif)
-          mkdir -p sys_work/system/app/ViaBrowser
-          wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" -O sys_work/system/app/ViaBrowser/ViaBrowser.apk || echo "Skip Via"
-          chmod 644 sys_work/system/app/ViaBrowser/ViaBrowser.apk
-          
-          # Injeksi Magisk
-          MAGISK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -o 'https://.*Magisk.*apk' | head -n 1)
-          if [ -n "$MAGISK_URL" ]; then
-            mkdir -p sys_work/system/priv-app/Magisk
-            wget -q "$MAGISK_URL" -O sys_work/system/priv-app/Magisk/Magisk.apk
-            chmod 644 sys_work/system/priv-app/Magisk/Magisk.apk
-          fi
+          # Lanjutkan perintah lainnya
+          rm -rf sys_work/system/product/app/{YouTube*,Maps*} || true
 EOF
+
 
       - name: Rebuild Image
         run: |
