@@ -14,8 +14,7 @@ jobs:
       - name: Install Build Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y simg2img img2simg e2fsprogs wget xz-utils p7zip-full
-
+          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils p7zip-full
       - name: Download & Prepare Image
         run: |
           wget "${{ github.event.inputs.gsi_url }}" -O system_input.img.xz
