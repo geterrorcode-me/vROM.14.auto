@@ -1,0 +1,69 @@
+name: vMeer GSI Slimmer (Official GMS + Via Browser)
+
+on:
+  workflow_dispatch:
+    inputs:
+      gsi_url:
+        description: 'gsi_gms_arm64-exp-UP1A.231005.007-10754064-77f9c9df.zip'
+        required: true
+
+jobs:
+  build-slim-rom:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Build Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y simg2img img2simg e2fsprogs wget xz-utils p7zip-full
+
+      - name: Download & Prepare Image
+        run: |
+          wget "${{ github.event.inputs.gsi_url }}" -O system_input.img.xz
+          # Ekstrak xz atau zip secara otomatis
+          xz -d system_input.img.xz || unzip system_input.img.xz
+          # Pastikan formatnya RAW agar bisa di-mount
+          simg2img system_input.img system_raw.img || mv system_input.img system_raw.img
+
+      - name: Surgical Debloat & Browser Injection
+        run: |
+          mkdir -p sys_mount
+          sudo mount -o loop system_raw.img sys_mount
+          
+          echo ">>> Menghapus Bloatware Berbahaya & Berat..."
+          # List penghapusan (Play Store tetap aman)
+          sudo rm -rf sys_mount/system/product/app/{YouTube,Maps,Gmail,Drive,CalendarGoogle}
+          sudo rm -rf sys_mount/system/product/priv-app/{Velvet,Photos}
+          sudo rm -rf sys_mount/system/app/Chrome
+          
+          echo ">>> Menyuntikkan Via Browser (Lightweight)..."
+          sudo mkdir -p sys_mount/system/app/ViaBrowser
+          sudo wget "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" -O sys_mount/system/app/ViaBrowser/ViaBrowser.apk
+          sudo chmod 644 sys_mount/system/app/ViaBrowser/ViaBrowser.apk
+          
+          echo ">>> Membersihkan Residu Audio & Video..."
+          sudo rm -rf sys_mount/system/media/audio/ringtones/*
+          sudo rm -rf sys_mount/system/media/audio/notifications/*
+          
+          sudo umount sys_mount
+
+      - name: Optimize & Shrink Filesystem
+        run: |
+          # Perbaiki struktur filesystem
+          sudo e2fsck -fy system_raw.img
+          # Kecilkan ukuran image ke batas minimum isi data
+          sudo resize2fs -M system_raw.img
+          # Set atribut Read-Only di level filesystem
+          sudo tune2fs -O read-only system_raw.img
+          mv system_raw.img vmeer_u14_slim.bin
+
+      - name: Compress to 7-Zip (Ultra Compression)
+        run: |
+          # Menggunakan kompresi tingkat 9 (Ultra) dengan LZMA2
+          7z a -mx=9 vmeer_u14_slim.7z vmeer_u14_slim.bin
+
+      - name: Upload Finished ROM
+        uses: actions/upload-artifact@v4
+        with:
+          name: vMeer-OS-GMS-Slim-ROM
+          path: vmeer_u14_slim.7z
+          
