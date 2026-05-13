@@ -78,15 +78,15 @@ jobs:
           [ ! -f "$BPROP" ] && BPROP="sys_work/build.prop"
 
           cat >> "$BPROP" <<EOT
-persist.sys.freeform_support=true
-persist.multi_window.enable=true
-ro.sf.lcd_density=160
-persist.sys.cursor.enable=true
-ro.input.mouse.enabled=1
-ro.config.show_ime=true
-qemu.hw.mainkeys=0
-ro.boot.selinux=permissive
-EOT
+          persist.sys.freeform_support=true
+          persist.multi_window.enable=true
+          ro.sf.lcd_density=160
+          persist.sys.cursor.enable=true
+          ro.input.mouse.enabled=1
+          ro.config.show_ime=true
+          qemu.hw.mainkeys=0
+          ro.boot.selinux=permissive
+          EOT
 
           # 4. Debloat Agresif
           rm -rf sys_work/system/product/app/{YouTube*,Maps*,Gmail*,Drive*,Photos*,Chrome*} || true
