@@ -11,86 +11,94 @@ jobs:
   build-slim-rom:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Advanced Tools
+      - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils p7zip-full zip unzip erofs-utils
+          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils p7zip-full zip unzip erofs-utils erofs-fuse fuse
 
-      - name: Download & Extract GSI
+      - name: Download & Extract
         run: |
           wget "${{ github.event.inputs.gsi_url }}" -O system_input.img.xz
-          echo ">>> Extracting..."
-          unzip system_input.img.xz || xz -d system_input.img.xz || echo "Already raw"
-          
+          unzip system_input.img.xz || xz -d system_input.img.xz || echo "Raw format detected"
           SOURCE_IMG=$(ls -S *.img | head -n 1)
-          echo "Source: $SOURCE_IMG"
-          
-          # Convert Sparse to Raw
-          /usr/bin/simg2img "$SOURCE_IMG" system_raw.img || mv "$SOURCE_IMG" system_raw.img
+          mv "$SOURCE_IMG" system_raw.img
 
-      - name: Surgical Debloat (Supports Ext4 & EROFS)
+      - name: Process Filesystem (Bash Script)
         run: |
+          set -e
           mkdir -p sys_mount sys_work
-          
-          # Cek tipe filesystem
-          FS_TYPE=$(lsblk -no FSTYPE system_raw.img || file -bL system_raw.img | awk '{print tolower($1)}')
-          echo "Detected FS: $FS_TYPE"
 
-          if [[ "$FS_TYPE" == *"erofs"* ]]; then
-            echo "EROFS detected. Extracting and converting to Ext4..."
-            sudo mount -t erofs -o loop system_raw.img sys_mount
-            cp -a sys_mount/. sys_work/
-            sudo umount sys_mount
-          else
-            echo "Ext4 detected. Mounting directly..."
-            sudo mount -o loop system_raw.img sys_mount
-            cp -a sys_mount/. sys_work/
-            sudo umount sys_mount
+          echo "=== Menganalisis system_raw.img ==="
+          FILE_INFO=$(file -bL system_raw.img)
+          echo "Tipe file: $FILE_INFO"
+
+          # Handle Sparse Image
+          if echo "$FILE_INFO" | grep -qi "sparse"; then
+              echo "Android Sparse Image terdeteksi. Mengkonversi..."
+              simg2img system_raw.img system_raw.img.raw
+              mv system_raw.img.raw system_raw.img
+              echo "Konversi selesai."
           fi
 
-          echo ">>> DEBLOATING IN WORKSPACE..."
-          # List penghapusan pada folder kerja
-          rm -rf sys_work/system/product/app/{YouTube,Maps,Gmail,Drive,CalendarGoogle}
-          rm -rf sys_work/system/product/priv-app/{Velvet,Photos}
-          rm -rf sys_work/system/app/Chrome
-          rm -rf sys_work/system/media/audio/ringtones/*
-          
-          echo ">>> INJECTING VIA BROWSER..."
-          mkdir -p sys_work/system/app/ViaBrowser
-          wget "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" -O sys_work/system/app/ViaBrowser/ViaBrowser.apk
-          chmod 644 sys_work/system/app/ViaBrowser/ViaBrowser.apk
+          # Handle EROFS or EXT4
+          if file -bL system_raw.img | grep -qi "erofs"; then
+              echo "EROFS terdeteksi. Menggunakan erofsfuse..."
+              sudo erofsfuse system_raw.img sys_mount || sudo mount -t erofs -o loop system_raw.img sys_mount
+              cp -a sys_mount/. sys_work/
+              sudo fusermount -u sys_mount 2>/dev/null || sudo umount -l sys_mount
+          elif file -bL system_raw.img | grep -qi "ext4"; then
+              echo "Ext4 terdeteksi."
+              sudo mount -t ext4 -o loop system_raw.img sys_mount
+              cp -a sys_mount/. sys_work/
+              sudo umount sys_mount
+          else
+              echo "Mencoba mount paksa sebagai ext4..."
+              sudo mount -t ext4 -o loop system_raw.img sys_mount || {
+                  echo "Gagal total. Info dmesg:"
+                  dmesg | tail -10
+                  exit 1
+              }
+              cp -a sys_mount/. sys_work/
+              sudo umount sys_mount
+          fi
 
-      - name: Build Final Ext4 Image
-        run: |
-          echo ">>> Creating Clean Ext4 Image..."
-          # Hitung estimasi ukuran (size folder + 200MB buffer)
-          SIZE=$(du -sk sys_work | cut -f1)
-          SIZE=$((SIZE + 204800)) 
+          echo ">>> PROSES DEBLOATING & INJECTION..."
+          # Gunakan sudo rm karena beberapa file sistem punya UID restricted
+          sudo rm -rf sys_work/system/product/app/{YouTube,Maps,Gmail,Drive,CalendarGoogle} || true
+          sudo rm -rf sys_work/system/product/priv-app/{Velvet,Photos} || true
+          sudo rm -rf sys_work/system/app/Chrome || true
           
-          # Buat image kosong
+          sudo mkdir -p sys_work/system/app/ViaBrowser
+          sudo wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" -O sys_work/system/app/ViaBrowser/ViaBrowser.apk
+          sudo chmod 644 sys_work/system/app/ViaBrowser/ViaBrowser.apk
+
+      - name: Rebuild to Ext4 Bin
+        run: |
+          echo "=== Membangun Ulang Image Ext4 ==="
+          # Hitung size folder kerja dalam KB + buffer 300MB
+          SIZE=$(sudo du -sk sys_work | cut -f1)
+          SIZE=$((SIZE + 307200))
+          
           dd if=/dev/zero of=vmeer_final.img bs=1K count=$SIZE
           mkfs.ext4 vmeer_final.img
           
-          # Salin file ke image baru
           mkdir final_mount
           sudo mount -o loop vmeer_final.img final_mount
           sudo cp -a sys_work/. final_mount/
           sudo umount final_mount
-
-      - name: Optimize & Compress
-        run: |
-          # Optimasi filesystem
+          
+          # Final Optimization
           sudo e2fsck -fy vmeer_final.img
           sudo resize2fs -M vmeer_final.img
           sudo tune2fs -O read-only vmeer_final.img
-          
           mv vmeer_final.img vmeer_u14_slim.bin
+
+      - name: Compress & Archive
+        run: |
           7z a -mx=9 vmeer_u14_slim.7z vmeer_u14_slim.bin
 
-      - name: Upload Artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: vMeer-GSI-Slim-7z
+          name: vMeer-GSI-Final
           path: vmeer_u14_slim.7z
-          retention-days: 3
-          
