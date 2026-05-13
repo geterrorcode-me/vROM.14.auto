@@ -1,4 +1,4 @@
-name: vMeer GSI Ultimate Slimmer
+name: vMeer GSI Ultimate Slimmer (VM Optimized)
 
 on:
   workflow_dispatch:
@@ -14,91 +14,114 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils p7zip-full zip unzip erofs-utils erofs-fuse fuse
+          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils \
+            p7zip-full zip unzip erofs-utils erofs-fuse fuse3 curl
 
-      - name: Download & Extract
+      - name: Download & Extract GSI
         run: |
-          wget "${{ github.event.inputs.gsi_url }}" -O system_input.img.xz
-          unzip system_input.img.xz || xz -d system_input.img.xz || echo "Raw format detected"
-          SOURCE_IMG=$(ls -S *.img | head -n 1)
+          wget -q --show-progress "${{ github.event.inputs.gsi_url }}" -O input.img.xz
+          
+          if [[ "${{ github.event.inputs.gsi_url }}" == *.zip ]]; then
+            unzip -o input.img.xz
+          elif [[ "${{ github.event.inputs.gsi_url }}" == *.xz ]]; then
+            xz -d -T0 input.img.xz
+          fi
+          
+          SOURCE_IMG=$(ls -S *.img 2>/dev/null | head -n 1)
           mv "$SOURCE_IMG" system_raw.img
+          echo "✅ system_raw.img siap ($(du -h system_raw.img | cut -f1))"
 
-      - name: Process Filesystem (Bash Script)
+      - name: Process, Debloat & Inject (VM Optimized)
         run: |
           set -e
           mkdir -p sys_mount sys_work
 
-          echo "=== Menganalisis system_raw.img ==="
+          # === Extract Image ===
           FILE_INFO=$(file -bL system_raw.img)
-          echo "Tipe file: $FILE_INFO"
-
-          # Handle Sparse Image
           if echo "$FILE_INFO" | grep -qi "sparse"; then
-              echo "Android Sparse Image terdeteksi. Mengkonversi..."
               simg2img system_raw.img system_raw.img.raw
               mv system_raw.img.raw system_raw.img
-              echo "Konversi selesai."
           fi
 
-          # Handle EROFS or EXT4
           if file -bL system_raw.img | grep -qi "erofs"; then
-              echo "EROFS terdeteksi. Menggunakan erofsfuse..."
-              sudo erofsfuse system_raw.img sys_mount || sudo mount -t erofs -o loop system_raw.img sys_mount
+              sudo erofsfuse -o ro system_raw.img sys_mount || sudo mount -t erofs -o loop system_raw.img sys_mount
               cp -a sys_mount/. sys_work/
               sudo fusermount -u sys_mount 2>/dev/null || sudo umount -l sys_mount
-          elif file -bL system_raw.img | grep -qi "ext4"; then
-              echo "Ext4 terdeteksi."
+          else
               sudo mount -t ext4 -o loop system_raw.img sys_mount
               cp -a sys_mount/. sys_work/
               sudo umount sys_mount
-          else
-              echo "Mencoba mount paksa sebagai ext4..."
-              sudo mount -t ext4 -o loop system_raw.img sys_mount || {
-                  echo "Gagal total. Info dmesg:"
-                  dmesg | tail -10
-                  exit 1
-              }
-              cp -a sys_mount/. sys_work/
-              sudo umount sys_mount
           fi
 
-          echo ">>> PROSES DEBLOATING & INJECTION..."
-          # Gunakan sudo rm karena beberapa file sistem punya UID restricted
-          sudo rm -rf sys_work/system/product/app/{YouTube,Maps,Gmail,Drive,CalendarGoogle} || true
-          sudo rm -rf sys_work/system/product/priv-app/{Velvet,Photos} || true
-          sudo rm -rf sys_work/system/app/Chrome || true
+          echo ">>> DEBLOATING SUPER AGRESIF (Play Store DIKEEP)..."
+          sudo rm -rf sys_work/system/product/app/{YouTube*,YouTubeMusic*,Maps*,Gmail*,Drive*,Calendar*,Photos*,Chrome*,Duo*,Meet*,News*,Assistant*,Wallet*} 2>/dev/null || true
+          sudo rm -rf sys_work/system/product/priv-app/{Velvet*,Photos*,SetupWizard,GoogleFeedback} 2>/dev/null || true
+          sudo rm -rf sys_work/system/app/Chrome* 2>/dev/null || true
+          sudo rm -rf sys_work/system/product/app/*{Facebook,Instagram,TikTok,Xiaomi,OPPO,VIVO}* 2>/dev/null || true
+          sudo rm -rf sys_work/system/media/audio/{ringtones,notifications}/* 2>/dev/null || true
+
+          echo ">>> OPTIMASI KHUSUS VM / vMeer..."
+          # Enable Desktop / Freeform Mode
+          sudo mkdir -p sys_work/system/etc
+          echo "persist.sys.freeform_support=true" | sudo tee -a sys_work/system/build.prop > /dev/null
+          echo "persist.sys.debug.force_default_orientation=0" | sudo tee -a sys_work/system/build.prop > /dev/null
           
+          # VM Friendly Properties
+          echo "ro.sf.lcd_density=160" | sudo tee -a sys_work/system/build.prop > /dev/null
+          echo "debug.sf.latch_unsignaled=1" | sudo tee -a sys_work/system/build.prop > /dev/null
+          echo "ro.boot.selinux=permissive" | sudo tee -a sys_work/system/build.prop > /dev/null
+          echo "ro.kernel.android.checkjni=0" | sudo tee -a sys_work/system/build.prop > /dev/null
+
+          echo ">>> INJECT VIA BROWSER + MAGISK + MODULES..."
+          # Via Browser
           sudo mkdir -p sys_work/system/app/ViaBrowser
-          sudo wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" -O sys_work/system/app/ViaBrowser/ViaBrowser.apk
+          sudo wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" \
+               -O sys_work/system/app/ViaBrowser/ViaBrowser.apk
           sudo chmod 644 sys_work/system/app/ViaBrowser/ViaBrowser.apk
 
-      - name: Rebuild to Ext4 Bin
+          # Magisk
+          MAGISK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -o 'https://.*Magisk.*apk' | head -n 1)
+          sudo mkdir -p sys_work/system/priv-app/Magisk
+          sudo wget -q "$MAGISK_URL" -O sys_work/system/priv-app/Magisk/Magisk.apk
+          sudo chmod 644 sys_work/system/priv-app/Magisk/Magisk.apk
+
+          # Play Integrity Fix + LSPosed
+          sudo mkdir -p sys_work/system/etc/init.d
+          sudo wget -q "https://github.com/KOWX712/PlayIntegrityFix/releases/latest/download/PlayIntegrityFix.zip" \
+               -O sys_work/system/etc/init.d/PlayIntegrityFix.zip || true
+          
+          LSP_URL=$(curl -s https://api.github.com/repos/mywalkb/LSPosed_mod/releases/latest | grep -o 'https://.*zygisk-release.zip' | head -n 1)
+          sudo wget -q "$LSP_URL" -O sys_work/system/etc/init.d/LSPosed.zip || true
+
+          echo "✅ Semua inject selesai. Siap untuk vMeer VM."
+
+      - name: Rebuild Image
         run: |
-          echo "=== Membangun Ulang Image Ext4 ==="
-          # Hitung size folder kerja dalam KB + buffer 300MB
-          SIZE=$(sudo du -sk sys_work | cut -f1)
-          SIZE=$((SIZE + 307200))
+          SIZE_KB=$(sudo du -sk sys_work | cut -f1)
+          SIZE_KB=$((SIZE_KB + 512000))
           
-          dd if=/dev/zero of=vmeer_final.img bs=1K count=$SIZE
-          mkfs.ext4 vmeer_final.img
+          dd if=/dev/zero of=vmeer_final.img bs=1K count=$SIZE_KB status=progress
+          mkfs.ext4 -F -L "system" -O ^has_journal vmeer_final.img
+
           
-          mkdir final_mount
+          mkdir -p final_mount
           sudo mount -o loop vmeer_final.img final_mount
           sudo cp -a sys_work/. final_mount/
           sudo umount final_mount
           
-          # Final Optimization
           sudo e2fsck -fy vmeer_final.img
           sudo resize2fs -M vmeer_final.img
-          sudo tune2fs -O read-only vmeer_final.img
-          mv vmeer_final.img vmeer_u14_slim.bin
+          sudo tune2fs -c 0 -i 0 -O read-only vmeer_final.img
+          
+          mv vmeer_final.img vmeer_u14_slim.img
 
-      - name: Compress & Archive
+      - name: Compress & Upload
         run: |
-          7z a -mx=9 vmeer_u14_slim.7z vmeer_u14_slim.bin
+          7z a -mx=9 vmeer_u14_slim.7z vmeer_u14_slim.img
 
-      - name: Upload
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vMeer-GSI-Final
+          name: vMeer-GSI-VM-Optimized
           path: vmeer_u14_slim.7z
+          retention-days: 7
