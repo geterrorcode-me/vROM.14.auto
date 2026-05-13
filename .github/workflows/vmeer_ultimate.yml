@@ -15,8 +15,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            android-sdk-libsparse-utils e2fsprogs wget xz-utils p7zip-full zip unzip \
-            erofs-utils fuse3 curl
+            android-sdk-libsparse-utils \
+            e2fsprogs \
+            wget \
+            xz-utils \
+            p7zip-full \
+            zip \
+            unzip \
+            erofs-utils \
+            fuse3 \
+            curl
 
       - name: Download & Extract GSI
         run: |
@@ -47,7 +55,7 @@ jobs:
           echo "=== Analisis Image ==="
           file -bL system_raw.img
 
-          # Konversi Sparse
+          # Konversi Sparse Image
           if file -bL system_raw.img | grep -qi "sparse"; then
               echo ">>> Converting Sparse Image..."
               simg2img system_raw.img system_raw.img.raw
@@ -56,7 +64,6 @@ jobs:
           fi
 
           echo ">>> Mencoba Extract Image..."
-
           SUCCESS=false
 
           if file -bL system_raw.img | grep -qi "erofs"; then
@@ -66,7 +73,7 @@ jobs:
                 sudo fusermount -u sys_mount 2>/dev/null || sudo umount -l sys_mount
                 SUCCESS=true
               } || {
-                echo "erofsfuse gagal, mencoba fsck.erofs"
+                echo "erofsfuse gagal, mencoba fsck.erofs..."
                 sudo fsck.erofs --extract=sys_work --no-preserve system_raw.img && SUCCESS=true
               }
           else
@@ -81,7 +88,7 @@ jobs:
               done
           fi
 
-          # Fallback debugfs jika semua gagal
+          # Fallback debugfs
           if [ "$SUCCESS" = false ]; then
               echo ">>> Mount gagal, mencoba debugfs fallback..."
               sudo debugfs -R "rdump / sys_work" system_raw.img 2>/dev/null || {
@@ -92,17 +99,17 @@ jobs:
 
           echo "✅ Extract selesai. Ukuran sys_work = $(du -sh sys_work | cut -f1)"
 
-          # Pastikan struktur folder sistem ada
           if [ ! -d "sys_work/system" ]; then
-            echo "⚠️ Struktur /system tidak ditemukan, mungkin image corrupt atau format lain."
+            echo "⚠️ Folder /system tidak ditemukan!"
             ls -la sys_work
             exit 1
           fi
 
-          # === Debloat & Optimasi VM ===
+          # Debloat
           echo ">>> DEBLOATING (Play Store AMAN)..."
           sudo rm -rf sys_work/system/product/app/{YouTube*,YouTubeMusic*,Maps*,Gmail*,Drive*,Calendar*,Photos*,Chrome*,Duo*,Meet*,News*,Assistant*,Wallet*} 2>/dev/null || true
 
+          # Optimasi VM
           echo ">>> OPTIMASI vMeer VM + Desktop Mode..."
           sudo mkdir -p sys_work/system/etc
           sudo tee -a sys_work/system/build.prop > /dev/null <<EOT
@@ -116,6 +123,7 @@ jobs:
           ro.boot.selinux=permissive
           EOT
 
+          # Inject Via Browser & Magisk
           echo ">>> INJECT VIA BROWSER + MAGISK..."
           sudo mkdir -p sys_work/system/app/ViaBrowser
           sudo wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" \
@@ -154,29 +162,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vMeer-GSI-VM-Optimized
-          path: vmeer_u14_slim.7z          SIZE_KB=$(sudo du -sk sys_work | cut -f1)
-          SIZE_KB=$((SIZE_KB + 512000))
-          
-          dd if=/dev/zero of=vmeer_final.img bs=1K count=$SIZE_KB status=none
-          mkfs.ext4 -F -L "system" -O ^has_journal vmeer_final.img
-          
-          mkdir -p final_mount
-          sudo mount -o loop vmeer_final.img final_mount
-          sudo cp -a sys_work/. final_mount/
-          sudo umount final_mount
-          
-          sudo e2fsck -fy vmeer_final.img
-          sudo resize2fs -M vmeer_final.img
-          sudo tune2fs -c 0 -i 0 -O read-only vmeer_final.img
-          mv vmeer_final.img vmeer_u14_slim.img
-
-      - name: Compress & Upload
-        run: |
-          7z a -mx=9 vmeer_u14_slim.7z vmeer_u14_slim.img
-          
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: vMeer-GSI-Final
           path: vmeer_u14_slim.7z
-          
+          retention-days: 7
