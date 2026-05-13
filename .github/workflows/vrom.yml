@@ -1,4 +1,4 @@
-name: vMeer GSI Slimmer (Official GMS + Via Browser)
+name: vMeer GSI Ultimate Slimmer
 
 on:
   workflow_dispatch:
@@ -6,85 +6,91 @@ on:
       gsi_url:
         description: 'Direct Link to GSI Image (ZIP/XZ/IMG)'
         required: true
-        default: ''
 
 jobs:
   build-slim-rom:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Build Tools
+      - name: Install Advanced Tools
         run: |
           sudo apt-get update
-          # Menggunakan android-sdk-libsparse-utils untuk Ubuntu 24.04+
-          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils p7zip-full zip unzip
+          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils p7zip-full zip unzip erofs-utils
 
       - name: Download & Extract GSI
         run: |
           wget "${{ github.event.inputs.gsi_url }}" -O system_input.img.xz
+          echo ">>> Extracting..."
+          unzip system_input.img.xz || xz -d system_input.img.xz || echo "Already raw"
           
-          echo ">>> Mendeteksi format file dan mengekstrak..."
-          # Mencoba ekstrak sebagai ZIP, jika gagal coba XZ
-          unzip system_input.img.xz || xz -d system_input.img.xz || echo "File mungkin sudah format mentah (.img)"
-          
-          # Mencari file .img terbesar sebagai source sistem
           SOURCE_IMG=$(ls -S *.img | head -n 1)
-          echo "Source image ditemukan: $SOURCE_IMG"
+          echo "Source: $SOURCE_IMG"
           
-          # Konversi dari Sparse ke Raw agar bisa di-mount
+          # Convert Sparse to Raw
           /usr/bin/simg2img "$SOURCE_IMG" system_raw.img || mv "$SOURCE_IMG" system_raw.img
 
-      - name: Surgical Debloat & Browser Injection
+      - name: Surgical Debloat (Supports Ext4 & EROFS)
         run: |
-          mkdir -p sys_mount
-          # Mount image sebagai loop device
-          sudo mount -o loop system_raw.img sys_mount
+          mkdir -p sys_mount sys_work
           
-          echo ">>> Menghapus Bloatware Berat (Play Store TETAP AMAN)..."
-          # Menghapus aplikasi besar di partisi /product dan /system
-          sudo rm -rf sys_mount/system/product/app/YouTube
-          sudo rm -rf sys_mount/system/product/app/Maps
-          sudo rm -rf sys_mount/system/product/app/Gmail
-          sudo rm -rf sys_mount/system/product/app/Drive
-          sudo rm -rf sys_mount/system/product/app/CalendarGoogle
-          sudo rm -rf sys_mount/system/product/priv-app/Velvet
-          sudo rm -rf sys_mount/system/product/priv-app/Photos
-          sudo rm -rf sys_mount/system/app/Chrome
-          
-          echo ">>> Menyuntikkan Via Browser (Super Ringan)..."
-          sudo mkdir -p sys_mount/system/app/ViaBrowser
-          sudo wget "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" -O sys_mount/system/app/ViaBrowser/ViaBrowser.apk
-          sudo chmod 644 sys_mount/system/app/ViaBrowser/ViaBrowser.apk
-          
-          echo ">>> Membersihkan Residu Audio & Wallpaper..."
-          sudo rm -rf sys_mount/system/media/audio/ringtones/*
-          sudo rm -rf sys_mount/system/media/audio/notifications/*
-          sudo rm -rf sys_mount/system/product/media/wallpaper/*
-          
-          # Hapus cache residu
-          sudo find sys_mount/system -name "*.odex" -delete
-          sudo find sys_mount/system -name "*.vdex" -delete
-          
-          echo ">>> Debloat Selesai. Melepas mount..."
-          sudo umount sys_mount
+          # Cek tipe filesystem
+          FS_TYPE=$(lsblk -no FSTYPE system_raw.img || file -bL system_raw.img | awk '{print tolower($1)}')
+          echo "Detected FS: $FS_TYPE"
 
-      - name: Optimize & Shrink Filesystem
-        run: |
-          # Perbaiki struktur filesystem setelah bedah
-          sudo e2fsck -fy system_raw.img
-          # Perkecil ukuran image ke batas minimum isi data agar hemat ruang
-          sudo resize2fs -M system_raw.img
-          # Kunci image menjadi Read-Only di level atribut filesystem
-          sudo tune2fs -O read-only system_raw.img
-          mv system_raw.img vmeer_u14_slim.bin
+          if [[ "$FS_TYPE" == *"erofs"* ]]; then
+            echo "EROFS detected. Extracting and converting to Ext4..."
+            sudo mount -t erofs -o loop system_raw.img sys_mount
+            cp -a sys_mount/. sys_work/
+            sudo umount sys_mount
+          else
+            echo "Ext4 detected. Mounting directly..."
+            sudo mount -o loop system_raw.img sys_mount
+            cp -a sys_mount/. sys_work/
+            sudo umount sys_mount
+          fi
 
-      - name: Compress to 7-Zip (Ultra)
+          echo ">>> DEBLOATING IN WORKSPACE..."
+          # List penghapusan pada folder kerja
+          rm -rf sys_work/system/product/app/{YouTube,Maps,Gmail,Drive,CalendarGoogle}
+          rm -rf sys_work/system/product/priv-app/{Velvet,Photos}
+          rm -rf sys_work/system/app/Chrome
+          rm -rf sys_work/system/media/audio/ringtones/*
+          
+          echo ">>> INJECTING VIA BROWSER..."
+          mkdir -p sys_work/system/app/ViaBrowser
+          wget "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" -O sys_work/system/app/ViaBrowser/ViaBrowser.apk
+          chmod 644 sys_work/system/app/ViaBrowser/ViaBrowser.apk
+
+      - name: Build Final Ext4 Image
         run: |
-          # Menggunakan 7z dengan kompresi level 9 (LZMA2)
+          echo ">>> Creating Clean Ext4 Image..."
+          # Hitung estimasi ukuran (size folder + 200MB buffer)
+          SIZE=$(du -sk sys_work | cut -f1)
+          SIZE=$((SIZE + 204800)) 
+          
+          # Buat image kosong
+          dd if=/dev/zero of=vmeer_final.img bs=1K count=$SIZE
+          mkfs.ext4 vmeer_final.img
+          
+          # Salin file ke image baru
+          mkdir final_mount
+          sudo mount -o loop vmeer_final.img final_mount
+          sudo cp -a sys_work/. final_mount/
+          sudo umount final_mount
+
+      - name: Optimize & Compress
+        run: |
+          # Optimasi filesystem
+          sudo e2fsck -fy vmeer_final.img
+          sudo resize2fs -M vmeer_final.img
+          sudo tune2fs -O read-only vmeer_final.img
+          
+          mv vmeer_final.img vmeer_u14_slim.bin
           7z a -mx=9 vmeer_u14_slim.7z vmeer_u14_slim.bin
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vMeer-GSI-Slim-ROM
+          name: vMeer-GSI-Slim-7z
           path: vmeer_u14_slim.7z
-          retention-days: 5
+          retention-days: 3
+          
