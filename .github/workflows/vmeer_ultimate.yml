@@ -102,7 +102,7 @@ jobs:
             wget -q "$MAGISK_URL" -O sys_work/system/priv-app/Magisk/Magisk.apk
             chmod 644 sys_work/system/priv-app/Magisk/Magisk.apk
           fi
-EOF
+          EOF
 
       - name: Rebuild Image
         run: |
