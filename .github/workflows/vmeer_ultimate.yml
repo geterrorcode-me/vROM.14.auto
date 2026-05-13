@@ -15,94 +15,72 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils \
-            p7zip-full zip unzip erofs-utils erofs-fuse fuse3 curl debugfs
+            p7zip-full zip unzip erofs-utils fuse3 curl
 
       - name: Download & Extract GSI
         run: |
           wget -q --show-progress "${{ github.event.inputs.gsi_url }}" -O input_file
           
-          echo ">>> Mendeteksi & mengekstrak..."
+          echo ">>> Mendeteksi format dan mengekstrak..."
           FTYPE=$(file -b input_file)
           if [[ "$FTYPE" == *"Zip"* ]]; then
             unzip -o input_file
-          elif [[ "$FTYPE" == *"XZ"* || "$FTYPE" == *"xz"* ]]; then
+          elif [[ "$FTYPE" == *"XZ"* ]]; then
             mv input_file input_file.xz
             xz -d -T0 input_file.xz
           else
-            mv input_file system_raw.img
+            mv input_file input_file.img
           fi
           
-          # Ambil file .img terbesar
-          SOURCE_IMG=$(ls -S *.img 2>/dev/null | head -n 1)
-          if [ -n "$SOURCE_IMG" ] && [ "$SOURCE_IMG" != "system_raw.img" ]; then
-            mv "$SOURCE_IMG" system_raw.img
-          fi
-          echo "✅ system_raw.img siap ($(du -h system_raw.img | cut -f1))"
+          SOURCE_IMG=$(find . -maxdepth 3 -name "*.img" -not -name "input_file.img" -exec du -b {} + | sort -rn | head -n 1 | cut -f2)
+          [ -z "$SOURCE_IMG" ] && exit 1
+          mv "$SOURCE_IMG" system_raw.img
 
       - name: Process, Debloat & Inject (Anti-Error 32)
         run: |
           set -e
           mkdir -p sys_mount sys_work
 
-          echo "=== Analisis Image ==="
-          file -bL system_raw.img
-
-          # Konversi Sparse Image
+          # 1. Pastikan Konversi Sparse ke Raw Benar-Benar Selesai
           if file -bL system_raw.img | grep -qi "sparse"; then
               echo ">>> Converting Sparse Image..."
               simg2img system_raw.img system_raw.img.raw
-              rm -f system_raw.img
+              rm system_raw.img
               mv system_raw.img.raw system_raw.img
           fi
 
-          echo ">>> Mencoba Mount / Extract..."
-
+          # 2. Logika Mounting yang Lebih Tangguh
+          echo ">>> Mencoba Mounting Image..."
           if file -bL system_raw.img | grep -qi "erofs"; then
-              echo ">>> EROFS terdeteksi"
-              
-              # Cara 1: erofsfuse (paling direkomendasikan)
-              sudo erofsfuse -o ro system_raw.img sys_mount && {
-                echo "erofsfuse berhasil"
-                cp -a sys_mount/. sys_work/
-                sudo fusermount -u sys_mount 2>/dev/null || sudo umount -l sys_mount
-              } || {
-                # Cara 2: fsck.erofs extract (fallback)
-                echo "erofsfuse gagal, pakai fsck.erofs --extract"
-                sudo fsck.erofs --extract=sys_work --no-preserve system_raw.img
-              }
+              echo ">>> EROFS detected."
+              sudo fsck.erofs --extract=sys_work system_raw.img
           else
-              echo ">>> Ext4 / Raw terdeteksi"
-              # Mount Ext4 dengan beberapa opsi
-              sudo mount -t ext4 -o loop,ro,noload system_raw.img sys_mount 2>/dev/null || \
-              sudo mount -t ext4 -o loop,ro system_raw.img sys_mount 2>/dev/null || \
-              sudo mount -o loop,ro system_raw.img sys_mount || {
-                echo "Mount gagal, mencoba debugfs fallback..."
-                sudo debugfs -R "rdump / sys_work" system_raw.img 2>/dev/null || {
-                  echo "❌ Semua metode gagal"
-                  exit 1
-                }
+              echo ">>> Ext4/Raw detected. Attempting Force Mount..."
+              # Mencoba mount dengan noload (mengabaikan journal jika rusak)
+              sudo mount -t ext4 -o loop,noload,ro system_raw.img sys_mount || \
+              sudo mount -o loop,ro system_raw.img sys_mount || \
+              {
+                echo "❌ Mount Gagal. Mencoba ekstraksi alternatif via debugfs..."
+                mkdir -p sys_work
+                sudo debugfs -R "rdump / sys_work" system_raw.img
               }
-              if [ -d "sys_mount" ] && mountpoint -q sys_mount; then
-                cp -a sys_mount/. sys_work/
+              
+              if [ -d "sys_mount/system" ] || [ -f "sys_mount/build.prop" ]; then
+                sudo cp -a sys_mount/. sys_work/
                 sudo umount -l sys_mount
               fi
           fi
 
-          echo "✅ Extract berhasil. Ukuran sys_work: $(du -sh sys_work | cut -f1)"
-
-          # === Debloat + Optimasi VM ===
-          echo ">>> DEBLOATING SUPER AGRESIF (Play Store AMAN)..."
-          sudo rm -rf sys_work/system/product/app/{YouTube*,YouTubeMusic*,Maps*,Gmail*,Drive*,Calendar*,Photos*,Chrome*,Duo*,Meet*,News*,Assistant*,Wallet*} 2>/dev/null || true
-          sudo rm -rf sys_work/system/product/priv-app/{Velvet*,Photos*,SetupWizard,GoogleFeedback} 2>/dev/null || true
-          sudo rm -rf sys_work/system/app/Chrome* 2>/dev/null || true
-
-          echo ">>> OPTIMASI vMeer VM + Desktop Mode..."
-          sudo mkdir -p sys_work/system/etc
+          # 3. Debloat & Injeksi Fitur Desktop + VM
+          echo ">>> OPTIMASI SYSTEM & VM..."
           BPROP="sys_work/system/build.prop"
+          [ ! -f "$BPROP" ] && BPROP="sys_work/build.prop"
+
           sudo tee -a "$BPROP" > /dev/null <<EOT
+          # vMeer VM Desktop & Input Optimization
           persist.sys.freeform_support=true
-          persist.multi_window.enable=true
           persist.sys.debug.force_default_orientation=0
+          persist.multi_window.enable=true
           ro.sf.lcd_density=160
           persist.sys.cursor.enable=true
           ro.input.mouse.enabled=1
@@ -112,24 +90,24 @@ jobs:
           debug.performance.tuning=1
           EOT
 
-          echo ">>> INJECT VIA BROWSER + MAGISK..."
+          # Debloat Agresif
+          sudo rm -rf sys_work/system/product/app/{YouTube*,Maps*,Gmail*,Drive*,Photos*,Chrome*} || true
+          
+          # Injeksi Browser & Magisk
           sudo mkdir -p sys_work/system/app/ViaBrowser
-          sudo wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" \
-               -O sys_work/system/app/ViaBrowser/ViaBrowser.apk
+          sudo wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" -O sys_work/system/app/ViaBrowser/ViaBrowser.apk
           sudo chmod 644 sys_work/system/app/ViaBrowser/ViaBrowser.apk
 
           MAGISK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -o 'https://.*Magisk.*apk' | head -n 1)
           sudo mkdir -p sys_work/system/priv-app/Magisk
           sudo wget -q "$MAGISK_URL" -O sys_work/system/priv-app/Magisk/Magisk.apk
-          sudo chmod 644 sys_work/system/priv-app/Magisk/Magisk.apk
 
-      - name: Rebuild Image
+      - name: Rebuild to Super Slim .bin
         run: |
-          echo "=== Rebuilding Image ==="
           SIZE_KB=$(sudo du -sk sys_work | cut -f1)
           SIZE_KB=$((SIZE_KB + 512000))
           
-          dd if=/dev/zero of=vmeer_final.img bs=1K count=$SIZE_KB status=progress
+          dd if=/dev/zero of=vmeer_final.img bs=1K count=$SIZE_KB status=none
           mkfs.ext4 -F -L "system" -O ^has_journal vmeer_final.img
           
           mkdir -p final_mount
@@ -140,16 +118,15 @@ jobs:
           sudo e2fsck -fy vmeer_final.img
           sudo resize2fs -M vmeer_final.img
           sudo tune2fs -c 0 -i 0 -O read-only vmeer_final.img
-          
           mv vmeer_final.img vmeer_u14_slim.img
 
       - name: Compress & Upload
         run: |
           7z a -mx=9 vmeer_u14_slim.7z vmeer_u14_slim.img
-
+          
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vMeer-GSI-VM-Optimized
+          name: vMeer-GSI-Final
           path: vmeer_u14_slim.7z
-          retention-days: 7
+          
