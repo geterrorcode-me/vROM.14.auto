@@ -15,8 +15,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils \
-            p7zip-full zip unzip erofs-utils erofs-fuse fuse3 curl
-
+            p7zip-full zip unzip erofs-utils fuse3 curl
+            
       - name: Download & Extract GSI
         run: |
           wget -q --show-progress "${{ github.event.inputs.gsi_url }}" -O input.img.xz
