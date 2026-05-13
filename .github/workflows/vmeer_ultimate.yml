@@ -1,0 +1,131 @@
+name: vMeer GSI Ultimate Slimmer (VM Optimized)
+
+on:
+  workflow_dispatch:
+    inputs:
+      gsi_url:
+        description: 'Direct Link to GSI Image (ZIP/XZ/IMG)'
+        required: true
+
+jobs:
+  build-slim-rom:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils \
+            p7zip-full zip unzip erofs-utils fuse3 curl
+
+      - name: Download & Extract GSI
+        run: |
+          wget -q --show-progress "${{ github.event.inputs.gsi_url }}" -O input_file
+          
+          echo ">>> Mendeteksi format dan mengekstrak..."
+          # Cek tipe file secara ajaib tanpa peduli ekstensi
+          FTYPE=$(file -b input_file)
+          if [[ "$FTYPE" == *"Zip"* ]]; then
+            unzip -o input_file
+          elif [[ "$FTYPE" == *"XZ"* ]]; then
+            mv input_file input_file.xz
+            xz -d -T0 input_file.xz
+          else
+            mv input_file input_file.img
+          fi
+          
+          echo ">>> Mencari file image sistem terbesar..."
+          # Mencari file .img terbesar (mengantisipasi subfolder di dalam ZIP)
+          SOURCE_IMG=$(find . -maxdepth 3 -name "*.img" -not -name "input_file.img" -exec du -b {} + | sort -rn | head -n 1 | cut -f2)
+          
+          if [ -z "$SOURCE_IMG" ]; then
+            echo "❌ ERROR: File .img tidak ditemukan!"
+            ls -R
+            exit 1
+          fi
+          
+          echo "✅ Menemukan image: $SOURCE_IMG"
+          mv "$SOURCE_IMG" system_raw.img
+
+      - name: Process, Debloat & Inject
+        run: |
+          set -e
+          mkdir -p sys_mount sys_work
+
+          # 1. Handle Sparse Image
+          FILE_INFO=$(file -bL system_raw.img)
+          if echo "$FILE_INFO" | grep -qi "sparse"; then
+              echo ">>> Converting Sparse to Raw..."
+              simg2img system_raw.img system_raw.img.raw
+              mv system_raw.img.raw system_raw.img
+          fi
+
+          # 2. Extract Content (EROFS/EXT4)
+          if file -bL system_raw.img | grep -qi "erofs"; then
+              echo ">>> EROFS detected. Extracting via fsck.erofs..."
+              sudo fsck.erofs --extract=sys_work system_raw.img
+          else
+              echo ">>> Ext4 detected. Mounting..."
+              sudo mount -o loop system_raw.img sys_mount
+              sudo cp -a sys_mount/. sys_work/
+              sudo umount sys_mount
+          fi
+
+          # 3. Debloat Agresif
+          echo ">>> DEBLOATING AGRESIF..."
+          sudo rm -rf sys_work/system/product/app/{YouTube*,YouTubeMusic*,Maps*,Gmail*,Drive*,Calendar*,Photos*,Chrome*,Duo*,Meet*,News*,Assistant*,Wallet*} || true
+          sudo rm -rf sys_work/system/product/priv-app/{Velvet*,Photos*,SetupWizard,GoogleFeedback} || true
+          sudo rm -rf sys_work/system/app/Chrome* || true
+          sudo rm -rf sys_work/system/media/audio/{ringtones,notifications}/* || true
+
+          # 4. Optimasi Build.prop untuk VM
+          echo ">>> APPLYING VM PROPERTIES..."
+          BPROP="sys_work/system/build.prop"
+          [ ! -f "$BPROP" ] && BPROP="sys_work/build.prop"
+          
+          echo "persist.sys.freeform_support=true" | sudo tee -a $BPROP
+          echo "ro.sf.lcd_density=160" | sudo tee -a $BPROP
+          echo "ro.boot.selinux=permissive" | sudo tee -a $BPROP
+          echo "debug.sf.latch_unsignaled=1" | sudo tee -a $BPROP
+
+          # 5. Injeksi Via Browser & Magisk
+          echo ">>> INJECTING APPS..."
+          sudo mkdir -p sys_work/system/app/ViaBrowser
+          sudo wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" -O sys_work/system/app/ViaBrowser/ViaBrowser.apk
+          sudo chmod 644 sys_work/system/app/ViaBrowser/ViaBrowser.apk
+
+          MAGISK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -o 'https://.*Magisk.*apk' | head -n 1)
+          sudo mkdir -p sys_work/system/priv-app/Magisk
+          sudo wget -q "$MAGISK_URL" -O sys_work/system/priv-app/Magisk/Magisk.apk
+          sudo chmod 644 sys_work/system/priv-app/Magisk/Magisk.apk
+
+      - name: Rebuild & Shrink (The .bin Output)
+        run: |
+          echo ">>> Calculating Size..."
+          SIZE_KB=$(sudo du -sk sys_work | cut -f1)
+          SIZE_KB=$((SIZE_KB + 512000)) # Tambahkan buffer 500MB
+          
+          dd if=/dev/zero of=vmeer_final.img bs=1K count=$SIZE_KB status=progress
+          # Hapus journal untuk performa Read-Only maksimal
+          mkfs.ext4 -F -L "system" -O ^has_journal vmeer_final.img
+          
+          mkdir -p final_mount
+          sudo mount -o loop vmeer_final.img final_mount
+          sudo cp -a sys_work/. final_mount/
+          sudo umount final_mount
+          
+          # Optimasi Akhir
+          sudo e2fsck -fy vmeer_final.img
+          sudo resize2fs -M vmeer_final.img
+          sudo tune2fs -c 0 -i 0 -O read-only vmeer_final.img
+          mv vmeer_final.img vmeer_u14_slim.img
+
+      - name: Compress to 7z & Upload
+        run: |
+          7z a -mx=9 vmeer_u14_slim.7z vmeer_u14_slim.img
+          
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vMeer-GSI-VM-Final
+          path: vmeer_u14_slim.7z
+          retention-days: 7
