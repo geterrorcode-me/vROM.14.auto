@@ -1,4 +1,4 @@
-name: vMeer GSI Ultimate (Fixed Mount)
+name: vMeer GSI Ultimate (Fixed Mount v2)
 
 on:
   workflow_dispatch:
@@ -14,72 +14,99 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils \
-            p7zip-full zip unzip erofs-utils fuse3 curl
+          sudo apt-get install -y \
+            android-sdk-libsparse-utils e2fsprogs wget xz-utils p7zip-full zip unzip \
+            erofs-utils fuse3 curl
 
       - name: Download & Extract GSI
         run: |
           wget -q --show-progress "${{ github.event.inputs.gsi_url }}" -O input_file
           
-          echo ">>> Mendeteksi format dan mengekstrak..."
+          echo ">>> Mendeteksi format..."
           FTYPE=$(file -b input_file)
           if [[ "$FTYPE" == *"Zip"* ]]; then
             unzip -o input_file
-          elif [[ "$FTYPE" == *"XZ"* ]]; then
+          elif [[ "$FTYPE" == *"XZ"* || "$FTYPE" == *"xz"* ]]; then
             mv input_file input_file.xz
             xz -d -T0 input_file.xz
           else
-            mv input_file input_file.img
+            mv input_file system_raw.img
           fi
           
-          SOURCE_IMG=$(find . -maxdepth 3 -name "*.img" -not -name "input_file.img" -exec du -b {} + | sort -rn | head -n 1 | cut -f2)
-          [ -z "$SOURCE_IMG" ] && exit 1
-          mv "$SOURCE_IMG" system_raw.img
+          SOURCE_IMG=$(ls -S *.img 2>/dev/null | head -n 1)
+          if [ -n "$SOURCE_IMG" ] && [ "$SOURCE_IMG" != "system_raw.img" ]; then
+            mv "$SOURCE_IMG" system_raw.img
+          fi
+          echo "✅ system_raw.img siap ($(du -h system_raw.img | cut -f1))"
 
       - name: Process, Debloat & Inject (Anti-Error 32)
         run: |
           set -e
           mkdir -p sys_mount sys_work
 
-          # 1. Pastikan Konversi Sparse ke Raw Benar-Benar Selesai
+          echo "=== Analisis Image ==="
+          file -bL system_raw.img
+
+          # Konversi Sparse
           if file -bL system_raw.img | grep -qi "sparse"; then
               echo ">>> Converting Sparse Image..."
               simg2img system_raw.img system_raw.img.raw
-              rm system_raw.img
+              rm -f system_raw.img
               mv system_raw.img.raw system_raw.img
           fi
 
-          # 2. Logika Mounting yang Lebih Tangguh
-          echo ">>> Mencoba Mounting Image..."
+          echo ">>> Mencoba Extract Image..."
+
+          SUCCESS=false
+
           if file -bL system_raw.img | grep -qi "erofs"; then
-              echo ">>> EROFS detected."
-              sudo fsck.erofs --extract=sys_work system_raw.img
-          else
-              echo ">>> Ext4/Raw detected. Attempting Force Mount..."
-              # Mencoba mount dengan noload (mengabaikan journal jika rusak)
-              sudo mount -t ext4 -o loop,noload,ro system_raw.img sys_mount || \
-              sudo mount -o loop,ro system_raw.img sys_mount || \
-              {
-                echo "❌ Mount Gagal. Mencoba ekstraksi alternatif via debugfs..."
-                mkdir -p sys_work
-                sudo debugfs -R "rdump / sys_work" system_raw.img
+              echo ">>> EROFS detected"
+              sudo erofsfuse -o ro system_raw.img sys_mount && {
+                cp -a sys_mount/. sys_work/
+                sudo fusermount -u sys_mount 2>/dev/null || sudo umount -l sys_mount
+                SUCCESS=true
+              } || {
+                echo "erofsfuse gagal, mencoba fsck.erofs"
+                sudo fsck.erofs --extract=sys_work --no-preserve system_raw.img && SUCCESS=true
               }
-              
-              if [ -d "sys_mount/system" ] || [ -f "sys_mount/build.prop" ]; then
-                sudo cp -a sys_mount/. sys_work/
-                sudo umount -l sys_mount
-              fi
+          else
+              echo ">>> Ext4 detected"
+              for opt in "loop,ro,noload" "loop,ro" "loop"; do
+                if sudo mount -t ext4 -o $opt system_raw.img sys_mount 2>/dev/null; then
+                  cp -a sys_mount/. sys_work/
+                  sudo umount -l sys_mount
+                  SUCCESS=true
+                  break
+                fi
+              done
           fi
 
-          # 3. Debloat & Injeksi Fitur Desktop + VM
-          echo ">>> OPTIMASI SYSTEM & VM..."
-          BPROP="sys_work/system/build.prop"
-          [ ! -f "$BPROP" ] && BPROP="sys_work/build.prop"
+          # Fallback debugfs jika semua gagal
+          if [ "$SUCCESS" = false ]; then
+              echo ">>> Mount gagal, mencoba debugfs fallback..."
+              sudo debugfs -R "rdump / sys_work" system_raw.img 2>/dev/null || {
+                echo "❌ GAGAL TOTAL mengekstrak image!"
+                exit 1
+              }
+          fi
 
-          sudo tee -a "$BPROP" > /dev/null <<EOT
-          # vMeer VM Desktop & Input Optimization
+          echo "✅ Extract selesai. Ukuran sys_work = $(du -sh sys_work | cut -f1)"
+
+          # Pastikan struktur folder sistem ada
+          if [ ! -d "sys_work/system" ]; then
+            echo "⚠️ Struktur /system tidak ditemukan, mungkin image corrupt atau format lain."
+            ls -la sys_work
+            exit 1
+          fi
+
+          # === Debloat & Optimasi VM ===
+          echo ">>> DEBLOATING (Play Store AMAN)..."
+          sudo rm -rf sys_work/system/product/app/{YouTube*,YouTubeMusic*,Maps*,Gmail*,Drive*,Calendar*,Photos*,Chrome*,Duo*,Meet*,News*,Assistant*,Wallet*} 2>/dev/null || true
+
+          echo ">>> OPTIMASI vMeer VM + Desktop Mode..."
+          sudo mkdir -p sys_work/system/etc
+          sudo tee -a sys_work/system/build.prop > /dev/null <<EOT
           persist.sys.freeform_support=true
-          persist.sys.debug.force_default_orientation=0
           persist.multi_window.enable=true
           ro.sf.lcd_density=160
           persist.sys.cursor.enable=true
@@ -87,24 +114,47 @@ jobs:
           ro.config.show_ime=true
           qemu.hw.mainkeys=0
           ro.boot.selinux=permissive
-          debug.performance.tuning=1
           EOT
 
-          # Debloat Agresif
-          sudo rm -rf sys_work/system/product/app/{YouTube*,Maps*,Gmail*,Drive*,Photos*,Chrome*} || true
-          
-          # Injeksi Browser & Magisk
+          echo ">>> INJECT VIA BROWSER + MAGISK..."
           sudo mkdir -p sys_work/system/app/ViaBrowser
-          sudo wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" -O sys_work/system/app/ViaBrowser/ViaBrowser.apk
+          sudo wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" \
+               -O sys_work/system/app/ViaBrowser/ViaBrowser.apk
           sudo chmod 644 sys_work/system/app/ViaBrowser/ViaBrowser.apk
 
           MAGISK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -o 'https://.*Magisk.*apk' | head -n 1)
           sudo mkdir -p sys_work/system/priv-app/Magisk
           sudo wget -q "$MAGISK_URL" -O sys_work/system/priv-app/Magisk/Magisk.apk
+          sudo chmod 644 sys_work/system/priv-app/Magisk/Magisk.apk
 
-      - name: Rebuild to Super Slim .bin
+      - name: Rebuild Image
         run: |
           SIZE_KB=$(sudo du -sk sys_work | cut -f1)
+          SIZE_KB=$((SIZE_KB + 512000))
+          
+          dd if=/dev/zero of=vmeer_final.img bs=1K count=$SIZE_KB status=progress
+          mkfs.ext4 -F -L "system" vmeer_final.img
+          
+          mkdir -p final_mount
+          sudo mount -o loop vmeer_final.img final_mount
+          sudo cp -a sys_work/. final_mount/
+          sudo umount final_mount
+          
+          sudo e2fsck -fy vmeer_final.img
+          sudo resize2fs -M vmeer_final.img
+          sudo tune2fs -c 0 -i 0 -O read-only vmeer_final.img
+          
+          mv vmeer_final.img vmeer_u14_slim.img
+
+      - name: Compress & Upload
+        run: |
+          7z a -mx=9 vmeer_u14_slim.7z vmeer_u14_slim.img
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vMeer-GSI-VM-Optimized
+          path: vmeer_u14_slim.7z          SIZE_KB=$(sudo du -sk sys_work | cut -f1)
           SIZE_KB=$((SIZE_KB + 512000))
           
           dd if=/dev/zero of=vmeer_final.img bs=1K count=$SIZE_KB status=none
