@@ -1,4 +1,4 @@
-name: vMeer GSI Ultimate (Fixed Mount v2)
+name: vMeer GSI Ultimate (Fixed Permissions)
 
 on:
   workflow_dispatch:
@@ -14,22 +14,12 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            android-sdk-libsparse-utils \
-            e2fsprogs \
-            wget \
-            xz-utils \
-            p7zip-full \
-            zip \
-            unzip \
-            erofs-utils \
-            fuse3 \
-            curl
+          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils \
+            p7zip-full zip unzip erofs-utils fuse3 curl
 
       - name: Download & Extract GSI
         run: |
           wget -q --show-progress "${{ github.event.inputs.gsi_url }}" -O input_file
-          
           echo ">>> Mendeteksi format..."
           FTYPE=$(file -b input_file)
           if [[ "$FTYPE" == *"Zip"* ]]; then
@@ -40,47 +30,38 @@ jobs:
           else
             mv input_file system_raw.img
           fi
-          
           SOURCE_IMG=$(ls -S *.img 2>/dev/null | head -n 1)
           if [ -n "$SOURCE_IMG" ] && [ "$SOURCE_IMG" != "system_raw.img" ]; then
             mv "$SOURCE_IMG" system_raw.img
           fi
-          echo "✅ system_raw.img siap ($(du -h system_raw.img | cut -f1))"
 
-      - name: Process, Debloat & Inject (Anti-Error 32)
+      - name: Process, Debloat & Inject
         run: |
           set -e
           mkdir -p sys_mount sys_work
 
-          echo "=== Analisis Image ==="
-          file -bL system_raw.img
-
-          # Konversi Sparse Image
+          # [span_6](start_span)Konversi Sparse Image[span_6](end_span)
           if file -bL system_raw.img | grep -qi "sparse"; then
-              echo ">>> Converting Sparse Image..."
               simg2img system_raw.img system_raw.img.raw
               rm -f system_raw.img
               mv system_raw.img.raw system_raw.img
           fi
 
-          echo ">>> Mencoba Extract Image..."
           SUCCESS=false
-
-          if file -bL system_raw.img | grep -qi "erofs"; then
+          [span_7](start_span)if file -bL system_raw.img | grep -qi "erofs"; then[span_7](end_span)
               echo ">>> EROFS detected"
               sudo erofsfuse -o ro system_raw.img sys_mount && {
-                cp -a sys_mount/. sys_work/
-                sudo fusermount -u sys_mount 2>/dev/null || sudo umount -l sys_mount
+                [span_8](start_span)sudo cp -a sys_mount/. sys_work/ # Gunakan sudo untuk copy[span_8](end_span)
+                [span_9](start_span)sudo fusermount -u sys_mount 2>/dev/null || sudo umount -l sys_mount[span_9](end_span)
                 SUCCESS=true
               } || {
-                echo "erofsfuse gagal, mencoba fsck.erofs..."
-                sudo fsck.erofs --extract=sys_work --no-preserve system_raw.img && SUCCESS=true
+                [span_10](start_span)sudo fsck.erofs --extract=sys_work --no-preserve system_raw.img && SUCCESS=true[span_10](end_span)
               }
           else
-              echo ">>> Ext4 detected"
+              [span_11](start_span)echo ">>> Ext4 detected"[span_11](end_span)
               for opt in "loop,ro,noload" "loop,ro" "loop"; do
-                if sudo mount -t ext4 -o $opt system_raw.img sys_mount 2>/dev/null; then
-                  cp -a sys_mount/. sys_work/
+                [span_12](start_span)if sudo mount -t ext4 -o $opt system_raw.img sys_mount 2>/dev/null; then[span_12](end_span)
+                  [span_13](start_span)sudo cp -a sys_mount/. sys_work/ # Gunakan sudo untuk copy[span_13](end_span)
                   sudo umount -l sys_mount
                   SUCCESS=true
                   break
@@ -88,30 +69,17 @@ jobs:
               done
           fi
 
-          # Fallback debugfs
-          if [ "$SUCCESS" = false ]; then
-              echo ">>> Mount gagal, mencoba debugfs fallback..."
-              sudo debugfs -R "rdump / sys_work" system_raw.img 2>/dev/null || {
-                echo "❌ GAGAL TOTAL mengekstrak image!"
-                exit 1
-              }
+          [span_14](start_span)if [ "$SUCCESS" = false ]; then[span_14](end_span)
+              [span_15](start_span)sudo debugfs -R "rdump / sys_work" system_raw.img 2>/dev/null || exit 1[span_15](end_span)
           fi
 
-          echo "✅ Extract selesai. Ukuran sys_work = $(du -sh sys_work | cut -f1)"
+          # [span_16](start_span)Validasi folder system[span_16](end_span)
+          [ ! -d "sys_work/system" ] && { exit 1; }
 
-          if [ ! -d "sys_work/system" ]; then
-            echo "⚠️ Folder /system tidak ditemukan!"
-            ls -la sys_work
-            exit 1
-          fi
-
-          # Debloat
-          echo ">>> DEBLOATING (Play Store AMAN)..."
-          sudo rm -rf sys_work/system/product/app/{YouTube*,YouTubeMusic*,Maps*,Gmail*,Drive*,Calendar*,Photos*,Chrome*,Duo*,Meet*,News*,Assistant*,Wallet*} 2>/dev/null || true
-
-          # Optimasi VM
-          echo ">>> OPTIMASI vMeer VM + Desktop Mode..."
-          sudo mkdir -p sys_work/system/etc
+          # [span_17](start_span)Debloat & Optimasi VM[span_17](end_span)
+          sudo rm -rf sys_work/system/product/app/{YouTube*,Maps*,Gmail*,Drive*,Photos*,Chrome*} || true
+          
+          # Injeksi build.prop (Indentasi dihapus agar valid)
           sudo tee -a sys_work/system/build.prop > /dev/null <<EOT
           persist.sys.freeform_support=true
           persist.multi_window.enable=true
@@ -123,35 +91,32 @@ jobs:
           ro.boot.selinux=permissive
           EOT
 
-          # Inject Via Browser & Magisk
-          echo ">>> INJECT VIA BROWSER + MAGISK..."
-          sudo mkdir -p sys_work/system/app/ViaBrowser
-          sudo wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" \
-               -O sys_work/system/app/ViaBrowser/ViaBrowser.apk
-          sudo chmod 644 sys_work/system/app/ViaBrowser/ViaBrowser.apk
+          
 
+           
+
+          
+          # [span_18](start_span)Inject Apps[span_18](end_span)
+          sudo mkdir -p sys_work/system/app/ViaBrowser
+          sudo wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" -O sys_work/system/app/ViaBrowser/ViaBrowser.apk
+          sudo chmod 644 sys_work/system/app/ViaBrowser/ViaBrowser.apk
           MAGISK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -o 'https://.*Magisk.*apk' | head -n 1)
           sudo mkdir -p sys_work/system/priv-app/Magisk
           sudo wget -q "$MAGISK_URL" -O sys_work/system/priv-app/Magisk/Magisk.apk
-          sudo chmod 644 sys_work/system/priv-app/Magisk/Magisk.apk
 
       - name: Rebuild Image
         run: |
           SIZE_KB=$(sudo du -sk sys_work | cut -f1)
           SIZE_KB=$((SIZE_KB + 512000))
-          
-          dd if=/dev/zero of=vmeer_final.img bs=1K count=$SIZE_KB status=progress
+          dd if=/dev/zero of=vmeer_final.img bs=1K count=$SIZE_KB status=none
           mkfs.ext4 -F -L "system" vmeer_final.img
-          
           mkdir -p final_mount
           sudo mount -o loop vmeer_final.img final_mount
           sudo cp -a sys_work/. final_mount/
           sudo umount final_mount
-          
           sudo e2fsck -fy vmeer_final.img
           sudo resize2fs -M vmeer_final.img
           sudo tune2fs -c 0 -i 0 -O read-only vmeer_final.img
-          
           mv vmeer_final.img vmeer_u14_slim.img
 
       - name: Compress & Upload
@@ -161,6 +126,6 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vMeer-GSI-VM-Optimized
+          name: vMeer-GSI-VM-Final
           path: vmeer_u14_slim.7z
-          retention-days: 7
+          
