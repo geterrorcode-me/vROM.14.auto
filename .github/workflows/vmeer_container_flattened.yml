@@ -119,7 +119,7 @@ jobs:
       - name: Pack Payload (TAR.XZ)
         run: |
           # Menggunakan tar.xz untuk menjaga symlink dan kompresi maksimal
-          sudo tar -cJf vmeer_payload.tar.xz -C vmeer_rootfs .
+          sudo tar -cJf vmeer_payload_1.0.0.tar.xz -C vmeer_rootfs .
 
       - name: Upload
         uses: actions/upload-artifact@v4
