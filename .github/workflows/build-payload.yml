@@ -1,50 +1,59 @@
-name: Generate Lightweight Rootfs
+name: VMeer Container Preparator
 on:
-  workflow_dispatch: # Bisa dijalankan manual
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: 'Direct Link ke ROM (7z/zip/img)'
+        required: true
+        default: 'https://example.com/vmeer_u14_slim.7z'
 
 jobs:
-  build-container-payload:
+  process-rom:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download Large ROM
-        run: |
-          # Ganti URL dengan link download ROM asli
-          curl -L -o vmeer_raw.7z " "
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y 7z tar xz-utils
 
-      - name: Extract and Strip ROM
+      - name: Download ROM
         run: |
-          mkdir -p raw_extract
-          mkdir -p container_rootfs
-          
-          # Ekstrak file 7z
-          7z x vmeer_raw.7z -oraw_extract
-          
-          # Jika di dalamnya ada file .img, kita mount atau ekstrak lagi
-          # Contoh jika ada system.img:
-          # 7z x raw_extract/system.img -ocontainer_rootfs/system
-          
-          # Pindahkan folder esensial ke rootfs container
-          mv raw_extract/system container_rootfs/
-          mv raw_extract/vendor container_rootfs/
-          
-          # PEMBERSIHAN: Buang file yang tidak perlu untuk Container
-          cd container_rootfs
-          rm -rf system/media/* # Hapus boot animasi/video
-          rm -rf system/tts/* # Hapus data suara
-          rm -rf system/app/Editors/* # Hapus app bawaan yang berat
-          find . -name "*.odex" -delete  # Opsional: hapus odex jika ingin super ramping
-          
-      - name: Repack to Lightweight Archive
-        run: |
-          # Kompres menggunakan tar.xz (sangat kecil)
-          tar -cJf vmeer_payload.tar.xz -C container_rootfs .
+          echo "Downloading from ${{ github.event.inputs.rom_url }}"
+          curl -L -o raw_rom.7z "${{ github.event.inputs.rom_url }}"
 
-      - name: Upload Artifact
+      - name: Decompress & Strip (The Surgery)
+        run: |
+          mkdir -p raw_folder
+          mkdir -p vmeer_rootfs
+          
+          # Ekstrak 7z asli
+          7z x raw_rom.7z -oraw_folder
+          
+          # Cari folder system dan vendor di hasil ekstrak
+          # Kita hanya ambil yang dibutuhkan untuk Container
+          cp -r raw_folder/system vmeer_rootfs/ 2>/dev/null || true
+          cp -r raw_folder/vendor vmeer_rootfs/ 2>/dev/null || true
+          
+          # OPTIMALISASI: Buang bloatware agar payload ringan
+          cd vmeer_rootfs
+          rm -rf system/media/* # Hapus boot animation & ringtones
+          rm -rf system/tts/* # Hapus data text-to-speech
+          rm -rf system/fonts/NotoColorEmoji.ttf # Hapus emoji (opsional, hemat 20MB)
+          
+          # Buat file identitas container
+          echo "container_version=1.0.0" > container.prop
+          echo "build_date=$(date)" >> container.prop
+
+      - name: Create Container Payload (.tar.xz)
+        run: |
+          # Menggunakan tar.xz karena kompresinya sangat kuat (bisa mengecilkan 1GB ke ~200MB)
+          tar -cJf vmeer_payload.tar.xz -C vmeer_rootfs .
+
+      - name: Upload Finished Payload
         uses: actions/upload-artifact@v4
         with:
-          name: vmeer-payload
+          name: vmeer-container-payload
           path: vmeer_payload.tar.xz
+          retention-days: 7
           
