@@ -1,0 +1,129 @@
+name: vMeer Container Builder (Flattened & Optimized)
+
+on:
+  workflow_dispatch:
+    inputs:
+      gsi_url:
+        description: 'Link Direct GSI (ZIP/XZ/IMG)'
+        required: true
+
+jobs:
+  build-container:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils \
+            p7zip-full zip unzip erofs-utils fuse3 curl file
+
+      - name: Download & Extract GSI
+        run: |
+          wget -q --show-progress "${{ github.event.inputs.gsi_url }}" -O input_file
+          FTYPE=$(file -b input_file)
+          if [[ "$FTYPE" == *"Zip"* ]]; then
+            unzip -o input_file
+          elif [[ "$FTYPE" == *"XZ"* || "$FTYPE" == *"xz"* ]]; then
+            mv input_file input_file.xz
+            xz -d -T0 input_file.xz
+          else
+            mv input_file system_raw.img
+          fi
+          SOURCE_IMG=$(ls -S *.img 2>/dev/null | head -n 1)
+          [ -n "$SOURCE_IMG" ] && [ "$SOURCE_IMG" != "system_raw.img" ] && mv "$SOURCE_IMG" system_raw.img
+
+      - name: System Surgery (Flatten & Debloat)
+        run: |
+          sudo bash << 'EOF'
+          set -e
+          mkdir -p sys_mount raw_work vmeer_rootfs/system
+
+          # 1. Extract GSI Content
+          if file -bL system_raw.img | grep -qi "sparse"; then
+              simg2img system_raw.img system_raw.img.raw
+              mv system_raw.img.raw system_raw.img
+          fi
+
+          if file -bL system_raw.img | grep -qi "erofs"; then
+              fsck.erofs --extract=raw_work --no-preserve system_raw.img
+          else
+              mkdir -p temp_mount
+              mount -o loop,ro system_raw.img temp_mount
+              cp -a temp_mount/. raw_work/
+              umount temp_mount
+          fi
+
+          # 2. Flattening (Menggabungkan partisi ke dalam /system)
+          echo "Flattening structures..."
+          cp -a raw_work/system/* vmeer_rootfs/system/ 2>/dev/null || cp -a raw_work/* vmeer_rootfs/system/
+          
+          # Pindahkan product & system_ext jika ada di luar folder system
+          if [ -d raw_work/product ]; then
+              mkdir -p vmeer_rootfs/system/product
+              cp -a raw_work/product/. vmeer_rootfs/system/product/
+          fi
+          if [ -d raw_work/system_ext ]; then
+              mkdir -p vmeer_rootfs/system/system_ext
+              cp -a raw_work/system_ext/. vmeer_rootfs/system/system_ext/
+          fi
+
+          # 3. Debloat Agresif
+          rm -rf vmeer_rootfs/system/media/*
+          rm -rf vmeer_rootfs/system/tts/*
+          rm -rf vmeer_rootfs/system/product/app/{YouTube*,Maps*,Gmail*,Drive*,Photos*,Chrome*} || true
+
+          # 4. Custom Init & Build.prop
+          BPROP="vmeer_rootfs/system/build.prop"
+          [ ! -f "$BPROP" ] && BPROP="vmeer_rootfs/system/system/build.prop"
+          
+          cat >> "$BPROP" <<EOT
+          vmeer.container.mode=1
+          ro.config.low_ram=true
+          persist.sys.freeform_support=true
+          ro.sf.lcd_density=160
+          EOT
+
+          # Injeksi init.vmeer.rc
+          mkdir -p vmeer_rootfs/system/etc/init
+          cat > vmeer_rootfs/system/etc/init/init.vmeer.rc <<RC
+          on early-init
+              setprop ro.debuggable 1
+              setprop ro.secure 0
+
+          on init
+              export PATH /sbin:/system/bin:/system/xbin
+              export ANDROID_ROOT /system
+              export ANDROID_DATA /data
+
+          on boot
+              start servicemanager
+              start hwservicemanager
+              start zygote
+
+          service servicemanager /system/bin/servicemanager
+              class core
+              user system
+              group system readproc
+              critical
+
+          service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-system-server
+              class main
+              user root
+              group root readproc
+          RC
+
+          # Link init utama ke custom init kita
+          ln -sf /system/etc/init/init.vmeer.rc vmeer_rootfs/init.rc
+          EOF
+
+      - name: Pack Payload (TAR.XZ)
+        run: |
+          # Menggunakan tar.xz untuk menjaga symlink dan kompresi maksimal
+          sudo tar -cJf vmeer_payload.tar.xz -C vmeer_rootfs .
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: vMeer-Container-Payload
+          path: vmeer_payload_1.0.0.tar.xz
+          
