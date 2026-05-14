@@ -1,0 +1,50 @@
+name: Generate Lightweight Rootfs
+on:
+  workflow_dispatch: # Bisa dijalankan manual
+
+jobs:
+  build-container-payload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Large ROM
+        run: |
+          # Ganti URL dengan link download ROM asli
+          curl -L -o vmeer_raw.7z " "
+
+      - name: Extract and Strip ROM
+        run: |
+          mkdir -p raw_extract
+          mkdir -p container_rootfs
+          
+          # Ekstrak file 7z
+          7z x vmeer_raw.7z -oraw_extract
+          
+          # Jika di dalamnya ada file .img, kita mount atau ekstrak lagi
+          # Contoh jika ada system.img:
+          # 7z x raw_extract/system.img -ocontainer_rootfs/system
+          
+          # Pindahkan folder esensial ke rootfs container
+          mv raw_extract/system container_rootfs/
+          mv raw_extract/vendor container_rootfs/
+          
+          # PEMBERSIHAN: Buang file yang tidak perlu untuk Container
+          cd container_rootfs
+          rm -rf system/media/* # Hapus boot animasi/video
+          rm -rf system/tts/* # Hapus data suara
+          rm -rf system/app/Editors/* # Hapus app bawaan yang berat
+          find . -name "*.odex" -delete  # Opsional: hapus odex jika ingin super ramping
+          
+      - name: Repack to Lightweight Archive
+        run: |
+          # Kompres menggunakan tar.xz (sangat kecil)
+          tar -cJf vmeer_payload.tar.xz -C container_rootfs .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmeer-payload
+          path: vmeer_payload.tar.xz
+          
