@@ -1,59 +1,140 @@
-name: VMeer Container Preparator
+name: vMeer GSI Ultimate (Full Optimized)
+
 on:
   workflow_dispatch:
     inputs:
-      rom_url:
-        description: 'Direct Link ke ROM (7z/zip/img)'
+      gsi_url:
+        description: 'Direct Link to GSI Image (ZIP/XZ/IMG)'
         required: true
-        default: 'https://example.com/vmeer_u14_slim.7z'
 
 jobs:
-  process-rom:
+  build-slim-rom:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y 7z tar xz-utils
-
-      - name: Download ROM
         run: |
-          echo "Downloading from ${{ github.event.inputs.rom_url }}"
-          curl -L -o raw_rom.7z "${{ github.event.inputs.rom_url }}"
+          sudo apt-get update
+          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils \
+            p7zip-full zip unzip erofs-utils fuse3 curl
 
-      - name: Decompress & Strip (The Surgery)
+      - name: Download & Extract GSI
         run: |
-          mkdir -p raw_folder
-          mkdir -p vmeer_rootfs
+          wget -q --show-progress "${{ github.event.inputs.gsi_url }}" -O input_file
           
-          # Ekstrak 7z asli
-          7z x raw_rom.7z -oraw_folder
+          FTYPE=$(file -b input_file)
+          if [[ "$FTYPE" == *"Zip"* ]]; then
+            unzip -o input_file
+          elif [[ "$FTYPE" == *"XZ"* || "$FTYPE" == *"xz"* ]]; then
+            mv input_file input_file.xz
+            xz -d -T0 input_file.xz
+          else
+            mv input_file system_raw.img
+          fi
           
-          # Cari folder system dan vendor di hasil ekstrak
-          # Kita hanya ambil yang dibutuhkan untuk Container
-          cp -r raw_folder/system vmeer_rootfs/ 2>/dev/null || true
-          cp -r raw_folder/vendor vmeer_rootfs/ 2>/dev/null || true
-          
-          # OPTIMALISASI: Buang bloatware agar payload ringan
-          cd vmeer_rootfs
-          rm -rf system/media/* # Hapus boot animation & ringtones
-          rm -rf system/tts/* # Hapus data text-to-speech
-          rm -rf system/fonts/NotoColorEmoji.ttf # Hapus emoji (opsional, hemat 20MB)
-          
-          # Buat file identitas container
-          echo "container_version=1.0.0" > container.prop
-          echo "build_date=$(date)" >> container.prop
+          SOURCE_IMG=$(ls -S *.img 2>/dev/null | head -n 1)
+          if [ -n "$SOURCE_IMG" ] && [ "$SOURCE_IMG" != "system_raw.img" ]; then
+            mv "$SOURCE_IMG" system_raw.img
+          fi
 
-      - name: Create Container Payload (.tar.xz)
+      - name: Process, Debloat & Inject
         run: |
-          # Menggunakan tar.xz karena kompresinya sangat kuat (bisa mengecilkan 1GB ke ~200MB)
-          tar -cJf vmeer_payload.tar.xz -C vmeer_rootfs .
+          sudo bash << 'EOF'
+          set -e
+          mkdir -p sys_mount sys_work
 
-      - name: Upload Finished Payload
+          # 1. Konversi Sparse Image jika terdeteksi
+          if file -bL system_raw.img | grep -qi "sparse"; then
+              simg2img system_raw.img system_raw.img.raw
+              mv system_raw.img.raw system_raw.img
+          fi
+
+          # 2. Ekstraksi Multimode (EROFS/EXT4)
+          SUCCESS=false
+          if file -bL system_raw.img | grep -qi "erofs"; then
+              erofsfuse -o ro system_raw.img sys_mount && {
+                cp -a sys_mount/. sys_work/
+                fusermount -u sys_mount 2>/dev/null || umount -l sys_mount
+                SUCCESS=true
+              } || {
+                fsck.erofs --extract=sys_work --no-preserve system_raw.img && SUCCESS=true
+              }
+          else
+              for opt in "loop,ro,noload" "loop,ro" "loop"; do
+                if mount -t ext4 -o $opt system_raw.img sys_mount 2>/dev/null; then
+                  cp -a sys_mount/. sys_work/
+                  umount -l sys_mount
+                  SUCCESS=true
+                  break
+                fi
+              done
+          fi
+
+          if [ "$SUCCESS" = false ]; then
+              debugfs -R "rdump / sys_work" system_raw.img 2>/dev/null || exit 1
+          fi
+
+          # 3. Optimasi VM & Build Prop
+          BPROP="sys_work/system/build.prop"
+          [ ! -f "$BPROP" ] && BPROP="sys_work/build.prop"
+
+          cat >> "$BPROP" <<EOT
+          persist.sys.freeform_support=true
+          persist.multi_window.enable=true
+          ro.sf.lcd_density=160
+          persist.sys.cursor.enable=true
+          ro.input.mouse.enabled=1
+          ro.config.show_ime=true
+          qemu.hw.mainkeys=0
+          ro.boot.selinux=permissive
+          persist.sys.debug.force_default_orientation=0
+          persist.sys.bluetooth.hardware=false
+          EOT
+
+          # 4. Debloat Agresif
+          rm -rf sys_work/system/product/app/{YouTube*,Maps*,Gmail*,Drive*,Photos*,Chrome*} || true
+          
+          # 5. Injeksi Aplikasi (Via Browser & Magisk)
+          mkdir -p sys_work/system/app/ViaBrowser
+          wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" -O sys_work/system/app/ViaBrowser/ViaBrowser.apk || echo "Skip Via"
+          chmod 644 sys_work/system/app/ViaBrowser/ViaBrowser.apk
+          
+          MAGISK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -o 'https://.*Magisk.*apk' | head -n 1)
+          if [ -n "$MAGISK_URL" ]; then
+            mkdir -p sys_work/system/priv-app/Magisk
+            wget -q "$MAGISK_URL" -O sys_work/system/priv-app/Magisk/Magisk.apk
+            chmod 644 sys_work/system/priv-app/Magisk/Magisk.apk
+          fi
+          EOF
+
+            - name: Prepare Rootfs for Containe
+          run: |
+          sudo bash << 'EOF'
+          # Folder sys_work sudah berisi hasil ekstraksi dan debloat dari step sebelumnya.
+          # Kita hanya perlu memastikan struktur foldernya benar untuk sebuah container.
+          
+          cd sys_work
+          
+          # Hapus file mentah sisa build image yang tidak perlu di dalam container
+          rm -f system_raw.img 2>/dev/null || true
+          
+          # Buat file penanda versi container
+          echo "vmeer_container_type=sandbox" > container_info.prop
+          echo "build_tag=ultimate_optimized" >> container_info.prop
+          
+          # Pastikan permission dasar binari Linux tetap terjaga
+          chmod -R 755 system/bin
+          chmod -R 755 system/xbin 2>/dev/null || true
+          EOF
+
+      - name: Repack to Container Payload (TAR.XZ)
+        run: |
+          # Kita gunakan tar.xz karena mendukung symlink dan permission Linux.
+          # Ini SANGAT penting agar container bisa booting tanpa error permission.
+          sudo tar -cJf vmeer_payload.tar.xz -C sys_work .
+
+      - name: Upload Container Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vmeer-container-payload
+          name: vMeer-Container-Payload
           path: vmeer_payload.tar.xz
           retention-days: 7
-          
