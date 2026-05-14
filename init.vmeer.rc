@@ -1,0 +1,43 @@
+# init.vmeer.rc - Optimized for Android Container
+
+on early-init
+    # Jangan lakukan mount filesystem di sini karena sudah ditangani Host
+    # Kita hanya set property dasar
+    setprop ro.debuggable 1
+    setprop ro.secure 0
+    setprop ro.allow.mock.location 1
+
+on init
+    # Setup environment variable untuk linker dan library
+    export PATH /sbin:/system/bin:/system/xbin
+    export LD_LIBRARY_PATH /system/lib64:/system/lib:/vendor/lib64:/vendor/lib
+    export ANDROID_BOOTLOGO 1
+    export ANDROID_ROOT /system
+    export ANDROID_ASSETS /system/app
+    export ANDROID_DATA /data
+    export EXTERNAL_STORAGE /sdcard
+
+on boot
+    # Memulai Service Manager (Otak komunikasi Binder)
+    start servicemanager
+    start hwservicemanager
+
+    # Memulai Zygote (Pematik aplikasi Java)
+    # Ini akan memicu munculnya UI Android di dalam container
+    start zygote
+
+service servicemanager /system/bin/servicemanager
+    class core
+    user system
+    group system readproc
+    critical
+    onrestart restart zygote
+
+service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-system-server
+    class main
+    priority -20
+    user root
+    group root readproc reserved_disk
+    socket zygote stream 660 root system
+    onrestart restart audioserver
+
