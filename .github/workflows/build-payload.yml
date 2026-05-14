@@ -1,4 +1,4 @@
-name: vMeer GSI Ultimate (Full Optimized)
+name: vMeer Container Ultimate (Lightweight Optimized)
 
 on:
   workflow_dispatch:
@@ -8,14 +8,14 @@ on:
         required: true
 
 jobs:
-  build-slim-rom:
+  build-container-payload:
     runs-on: ubuntu-latest
     steps:
       - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget xz-utils \
-            p7zip-full zip unzip erofs-utils fuse3 curl
+            p7zip-full zip unzip erofs-utils fuse3 curl file
 
       - name: Download & Extract GSI
         run: |
@@ -36,7 +36,7 @@ jobs:
             mv "$SOURCE_IMG" system_raw.img
           fi
 
-      - name: Process, Debloat & Inject
+      - name: Process & Debloat
         run: |
           sudo bash << 'EOF'
           set -e
@@ -73,7 +73,7 @@ jobs:
               debugfs -R "rdump / sys_work" system_raw.img 2>/dev/null || exit 1
           fi
 
-          # 3. Optimasi VM & Build Prop
+          # 3. Optimasi VM & Build Prop (Tweaks untuk Sandbox/Container)
           BPROP="sys_work/system/build.prop"
           [ ! -f "$BPROP" ] && BPROP="sys_work/build.prop"
 
@@ -88,12 +88,15 @@ jobs:
           ro.boot.selinux=permissive
           persist.sys.debug.force_default_orientation=0
           persist.sys.bluetooth.hardware=false
+          vmeer.container.mode=1
           EOT
 
-          # 4. Debloat Agresif
+          # 4. Debloat Agresif (Mengurangi Ukuran)
           rm -rf sys_work/system/product/app/{YouTube*,Maps*,Gmail*,Drive*,Photos*,Chrome*} || true
+          rm -rf sys_work/system/media/* || true
+          rm -rf sys_work/system/tts/* || true
           
-          # 5. Injeksi Aplikasi (Via Browser & Magisk)
+          # 5. Injeksi Aplikasi Minimalis
           mkdir -p sys_work/system/app/ViaBrowser
           wget -q "https://github.com/tuyafeng/Via/raw/master/app/release/app-release.apk" -O sys_work/system/app/ViaBrowser/ViaBrowser.apk || echo "Skip Via"
           chmod 644 sys_work/system/app/ViaBrowser/ViaBrowser.apk
@@ -106,30 +109,21 @@ jobs:
           fi
           EOF
 
-            - name: Prepare Rootfs for Containe
-          run: |
+      - name: Prepare & Compress Rootfs (Container Mode)
+        run: |
           sudo bash << 'EOF'
-          # Folder sys_work sudah berisi hasil ekstraksi dan debloat dari step sebelumnya.
-          # Kita hanya perlu memastikan struktur foldernya benar untuk sebuah container.
-          
+          # Memastikan permission Linux tetap terjaga (Sangat Krusial untuk Booting)
           cd sys_work
-          
-          # Hapus file mentah sisa build image yang tidak perlu di dalam container
-          rm -f system_raw.img 2>/dev/null || true
-          
-          # Buat file penanda versi container
-          echo "vmeer_container_type=sandbox" > container_info.prop
-          echo "build_tag=ultimate_optimized" >> container_info.prop
-          
-          # Pastikan permission dasar binari Linux tetap terjaga
           chmod -R 755 system/bin
           chmod -R 755 system/xbin 2>/dev/null || true
+          
+          # Buat penanda metadata container
+          echo "vmeer_payload_version=1.0.0" > vmeer_meta.prop
+          echo "build_date=$(date)" >> vmeer_meta.prop
           EOF
 
-      - name: Repack to Container Payload (TAR.XZ)
-        run: |
-          # Kita gunakan tar.xz karena mendukung symlink dan permission Linux.
-          # Ini SANGAT penting agar container bisa booting tanpa error permission.
+          # Kompresi tingkat tinggi menggunakan XZ (.tar.xz)
+          # Mendukung symbolic links yang sangat dibutuhkan oleh Android libraries (.so)
           sudo tar -cJf vmeer_payload.tar.xz -C sys_work .
 
       - name: Upload Container Artifact
@@ -138,3 +132,4 @@ jobs:
           name: vMeer-Container-Payload
           path: vmeer_payload.tar.xz
           retention-days: 7
+          
